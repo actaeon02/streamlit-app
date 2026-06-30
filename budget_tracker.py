@@ -20,43 +20,53 @@ st.title("💸 Personal Finance Tracker")
 menu = st.radio("📚 Select View", ["Expenses", "Income"], horizontal=True)
 
 # --- Google Sheets Connection Setup ---
-try:
-    gcp_secrets = st.secrets["connections"]["gsheets"]
-    SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
-    private_key = gcp_secrets["private_key"].replace("\\n", "\n")
-    credentials = Credentials.from_service_account_info(
-        {
-            "type": gcp_secrets["type"],
-            "project_id": gcp_secrets["project_id"],
-            "private_key_id": gcp_secrets["private_key_id"],
-            "private_key": private_key,
-            "client_email": gcp_secrets["client_email"],
-            "client_id": gcp_secrets["client_id"],
-            "auth_uri": gcp_secrets["auth_uri"],
-            "token_uri": gcp_secrets["token_uri"],
-            "auth_provider_x509_cert_url": gcp_secrets["auth_provider_x509_cert_url"],
-            "client_x509_cert_url": gcp_secrets["client_x509_cert_url"],
-        },
-        scopes=SCOPE
-    )
-    spreadsheet_url = gcp_secrets["spreadsheet"]
-except Exception:
-    SERVICE_ACCOUNT_FILE = r"C:\\Users\\Mikael\\service_account_keys.json"
-    SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
-    credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPE)
-    spreadsheet_url = "https://docs.google.com/spreadsheets/d/14XBx3LvGTUOmx5tN43OSWyabT5sdUHML2h2rfI6YemI/edit?gid=258870691"
+@st.cache_resource
+def get_google_sheets_connection():
+    try:
+        gcp_secrets = st.secrets["connections"]["gsheets"]
+        SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
+        private_key = gcp_secrets["private_key"].replace("\\n", "\n")
+        credentials = Credentials.from_service_account_info(
+            {
+                "type": gcp_secrets["type"],
+                "project_id": gcp_secrets["project_id"],
+                "private_key_id": gcp_secrets["private_key_id"],
+                "private_key": private_key,
+                "client_email": gcp_secrets["client_email"],
+                "client_id": gcp_secrets["client_id"],
+                "auth_uri": gcp_secrets["auth_uri"],
+                "token_uri": gcp_secrets["token_uri"],
+                "auth_provider_x509_cert_url": gcp_secrets["auth_provider_x509_cert_url"],
+                "client_x509_cert_url": gcp_secrets["client_x509_cert_url"],
+            },
+            scopes=SCOPE
+        )
+        spreadsheet_url = gcp_secrets["spreadsheet"]
+    except Exception:
+        SERVICE_ACCOUNT_FILE = r"C:\\Users\\Mikael\\service_account_keys.json"
+        SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
+        credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPE)
+        spreadsheet_url = "https://docs.google.com/spreadsheets/d/14XBx3LvGTUOmx5tN43OSWyabT5sdUHML2h2rfI6YemI/edit?gid=258870691"
+    
+    gc = gspread.authorize(credentials)
+    sh = gc.open_by_url(spreadsheet_url)
+    return sh
 
-# Connect to Google Sheets
-gc = gspread.authorize(credentials)
-sh = gc.open_by_url(spreadsheet_url)
+@st.cache_data(ttl=60)  # Cache for 60 seconds
+def load_sheet_data(sheet_name):
+    sh = get_google_sheets_connection()
+    ws = sh.worksheet(sheet_name)
+    return pd.DataFrame(ws.get_all_records())
+
+# Load data
+sh = get_google_sheets_connection()
 ws_expenses = sh.worksheet("Expenses")
 ws_income = sh.worksheet("Income")
 ws_budget = sh.worksheet("Budget")
 
-# Load data
-expenses_df = pd.DataFrame(ws_expenses.get_all_records())
-income_df = pd.DataFrame(ws_income.get_all_records())
-budget_df = pd.DataFrame(ws_budget.get_all_records())
+expenses_df = load_sheet_data("Expenses")
+income_df = load_sheet_data("Income")
+budget_df = load_sheet_data("Budget")
 
 # Preprocess dates and values
 if not expenses_df.empty:
@@ -112,23 +122,31 @@ if menu == "Expenses":
         "Laundry",
         "Gifts",
         "Investment",
+        "Credit Card Payment",
+        "PayLater Payment",
         "Other",
     ]
 
-    # Initialize session state for the date and amount
-    if "expense_date" not in st.session_state:
-        st.session_state.expense_date = datetime.today().date()
-    if "expense_amount" not in st.session_state:
-        st.session_state.expense_amount = 0.01
-    if "expense_category" not in st.session_state:
-        st.session_state.expense_category = "Other"
+    # Initialize session state keys if they don't exist
+    if "selected_description" not in st.session_state:
+        st.session_state.selected_description = "New Entry"
+    if "form_amount" not in st.session_state:
+        st.session_state.form_amount = 1000.00
+    if "form_category" not in st.session_state:
+        st.session_state.form_category = "Other"
 
     # Get a list of unique descriptions from expenses data
-    unique_descriptions = ["New Entry"] + list(expenses_df["Item"].unique())
+    unique_descriptions = ["New Entry"] + sorted(list(expenses_df["Item"].unique()))
 
-    # This is a new callback function to update the amount
+    # Initialize form reset counter
+    if "form_reset_counter" not in st.session_state:
+        st.session_state.form_reset_counter = 0
+
+    # Callback function to update form fields when description changes
     def update_fields():
         selected_desc = st.session_state.description_select
+        st.session_state.selected_description = selected_desc
+        
         if selected_desc != "New Entry":
             latest_record_df = expenses_df[
                 expenses_df["Item"] == selected_desc
@@ -136,17 +154,23 @@ if menu == "Expenses":
 
             if not latest_record_df.empty:
                 # Update Amount
-                st.session_state.expense_amount = float(latest_record_df["Amount"].iloc[0])
+                st.session_state.form_amount = float(latest_record_df["Amount"].iloc[0])
 
                 # Update Category
                 prev_cat = latest_record_df["Category"].iloc[0]
                 if prev_cat in category_options:
-                    st.session_state.expense_category = prev_cat
+                    st.session_state.form_category = prev_cat
+                else:
+                    st.session_state.form_category = "Other"
         else:
-            st.session_state.expense_amount = 0.01
-            st.session_state.expense_category = "Other"
+            # Reset to defaults for new entry
+            st.session_state.form_amount = 1000.00
+            st.session_state.form_category = "Other"
 
-    # --- Description and Amount Logic (Outside the Form) ---
+        # Increment counter to force widget recreation
+        st.session_state.form_reset_counter += 1
+
+    # Description selector (outside form)
     selected_description = st.selectbox(
         "Description",
         unique_descriptions,
@@ -154,39 +178,45 @@ if menu == "Expenses":
         on_change=update_fields,
     )
 
-    # Use an if/else block to get the final item description
-    item = ""
+    # Get item description
     if selected_description == "New Entry":
-        item = st.text_input("New Description")
+        item = st.text_input("New Description", key="new_description_input")
     else:
         item = selected_description
 
+    # Form for expense entry
     with st.form("expense_form", clear_on_submit=True):
         user = st.radio("Who?", ["Mikael", "Josephine"], key="expense_user")
-
-        # Use session state to manage the date
+        
         purchase_date = st.date_input(
-            "Date", value=st.session_state.expense_date, key="expense_date_input"
+            "Date", 
+            value=datetime.today().date(),
+            key="expense_date_input"
         )
 
-        # The amount input, populated from session state
+        # CRITICAL FIX: Use session state value directly, not the key parameter
         amount = st.number_input(
             "Amount",
-            min_value=0.01,
+            min_value=1000.00,
+            step=1000.00,
             format="%.2f",
-            # value=st.session_state.expense_amount,
-            key="expense_amount",
+            value=st.session_state.form_amount,
+            # key="amount_input"
+            key=f"amount_input_{st.session_state.get('form_reset_counter', 0)}"
         )
 
-        # Category selector
         category = st.selectbox(
             "Category",
             category_options,
-            key="expense_category",
+            index=category_options.index(st.session_state.form_category) if st.session_state.form_category in category_options else category_options.index("Other"),
+            # key="category_input"
+            key=f"category_input_{st.session_state.get('form_reset_counter', 0)}"
         )
 
         method = st.radio(
-            "Payment Method", ["CC Mikael", "CC Josephine", "Debit", "Cash", "PayLater"], key="expense_method"
+            "Payment Method", 
+            ["CC Mikael", "CC Josephine", "Debit", "Cash", "PayLater"], 
+            key="expense_method"
         )
 
         submit = st.form_submit_button("➕ Add Expense")
@@ -205,79 +235,131 @@ if menu == "Expenses":
                 method,
             ]
             ws_expenses.append_row(row)
-            st.success("Expense added!")
-
-            # Keep the last selected date and reset the amount for the next entry
-            st.session_state.expense_date = purchase_date
+            
+            # Clear cache to reload data
+            st.cache_data.clear()
+            
+            st.success(f"Expense added: {item} - {amount:,.2f} IDR ({category})")
+            
+            # Reset to defaults for next entry
+            st.session_state.form_amount = 1000.00
+            st.session_state.form_category = "Other"
+            st.session_state.selected_description = "New Entry"
+            st.session_state.form_reset_counter += 1
+            
             st.rerun()
 
-    # Expense by Category
+    # Add filter option for CC/PayLater payments
     st.subheader("📊 Monthly Category Spending")
+    
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        exclude_cc_payments = st.checkbox(
+            "Exclude CC/PayLater bill payments", 
+            value=True,
+            help="Exclude credit card and PayLater bill payments from spending view"
+        )
+    
     if not expenses_period.empty:
-        target_categories = ["Bills", "Food & Drink", "Transport"]
-        filtered = expenses_period[
-            (expenses_period["Category"].isin(target_categories)) &
-            (expenses_period["Payment Method"] != "PayLater")
+        target_categories = ["Bills", "Food & Drink", "Subscriptions", "Shopping"]
+        
+        # Filter based on checkbox
+        if exclude_cc_payments:
+            filtered = expenses_period[
+                (expenses_period["Category"].isin(target_categories)) &
+                (~expenses_period["Category"].isin(["Credit Card Payment", "PayLater Payment"]))
             ]
-        category_spending = filtered.groupby("Category")["Amount"].sum().reset_index()
-        full_category_df = pd.DataFrame({"Category": target_categories})
-        category_spending = pd.merge(full_category_df, category_spending, on="Category", how="left").fillna(0)
+        else:
+            filtered = expenses_period[
+                (expenses_period["Category"].isin(target_categories))
+            ]
+        
+        if not filtered.empty:
+            category_spending = filtered.groupby("Category")["Amount"].sum().reset_index()
+            full_category_df = pd.DataFrame({"Category": target_categories})
+            category_spending = pd.merge(full_category_df, category_spending, on="Category", how="left").fillna(0)
 
-        bar = alt.Chart(category_spending).mark_bar().encode(
-            x=alt.X("Category", sort=target_categories, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Amount", title="Total Spending (IDR)"),
-            color=alt.Color("Category", legend=None),
-            tooltip=["Category", alt.Tooltip("Amount", format=",.2f")]
-        )
+            bar = alt.Chart(category_spending).mark_bar().encode(
+                x=alt.X("Category", sort=target_categories, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Amount", title="Total Spending (IDR)"),
+                color=alt.Color("Category", legend=None),
+                tooltip=["Category", alt.Tooltip("Amount", format=",.2f")]
+            )
 
-        text = alt.Chart(category_spending).mark_text(
-            align='center',
-            baseline='bottom',
-            color='white',
-            dy=-10
-        ).encode(
-            x=alt.X("Category", sort=target_categories),
-            y="Amount",
-            text=alt.Text("Amount:Q", format=",.0f")
-        )
+            text = alt.Chart(category_spending).mark_text(
+                align='center',
+                baseline='bottom',
+                color='white',
+                dy=-10
+            ).encode(
+                x=alt.X("Category", sort=target_categories),
+                y="Amount",
+                text=alt.Text("Amount:Q", format=",.0f")
+            )
 
-        st.altair_chart(bar + text, use_container_width=True)
-        st.dataframe(category_spending, column_config={
-            "Amount": st.column_config.NumberColumn("Amount", format='accounting')
-        }, use_container_width=True)
+            st.altair_chart(bar + text, use_container_width=True)
+            st.dataframe(category_spending, column_config={
+                "Amount": st.column_config.NumberColumn("Amount", format='accounting')
+            }, use_container_width=True)
+        else:
+            st.info("No spending data for the selected categories this period.")
 
     # Spending per User
     st.subheader("📊 Total Spending Per User")
     if not expenses_period.empty:
-        user_spending = expenses_period[expenses_period["Payment Method"] != "PayLater"].groupby("User")["Amount"].sum().reset_index()
-        user_order = user_spending.sort_values("Amount", ascending=False)["User"].tolist()
-        user_spending["User"] = pd.Categorical(user_spending["User"], categories=user_order, ordered=True)
+        # Apply the same filter logic
+        if exclude_cc_payments:
+            user_filtered = expenses_period[
+                (expenses_period["Payment Method"] != "PayLater") &
+                (~expenses_period["Category"].isin(["Credit Card Payment", "PayLater Payment"]))
+            ]
+        else:
+            user_filtered = expenses_period[expenses_period["Payment Method"] != "PayLater"]
+        
+        if not user_filtered.empty:
+            user_spending = user_filtered.groupby("User")["Amount"].sum().reset_index()
+            user_order = user_spending.sort_values("Amount", ascending=False)["User"].tolist()
+            user_spending["User"] = pd.Categorical(user_spending["User"], categories=user_order, ordered=True)
 
-        bar_user = alt.Chart(user_spending).mark_bar().encode(
-            x=alt.X("User", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Amount", sort=user_order, title="Total Spending (IDR)"),
-            color=alt.Color("User", legend=None),
-            tooltip=["User", alt.Tooltip("Amount", format=",.2f")]
-        )
+            bar_user = alt.Chart(user_spending).mark_bar().encode(
+                x=alt.X("User", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Amount", sort=user_order, title="Total Spending (IDR)"),
+                color=alt.Color("User", legend=None),
+                tooltip=["User", alt.Tooltip("Amount", format=",.2f")]
+            )
 
-        text_user = alt.Chart(user_spending).mark_text(
-            align='center',
-            baseline='bottom',
-            color='white',
-            dy=-10
-        ).encode(
-            x="User",
-            y="Amount",
-            text=alt.Text("Amount:Q", format=",.0f")
-        )
+            text_user = alt.Chart(user_spending).mark_text(
+                align='center',
+                baseline='bottom',
+                color='white',
+                dy=-10
+            ).encode(
+                x="User",
+                y="Amount",
+                text=alt.Text("Amount:Q", format=",.0f")
+            )
 
-        st.altair_chart(bar_user + text_user, use_container_width=True)
+            st.altair_chart(bar_user + text_user, use_container_width=True)
 
-        # Sort user_spending by Amount descending
-        user_spending_sorted = user_spending.sort_values("Amount", ascending=False).reset_index(drop=True)
-        st.dataframe(user_spending_sorted, column_config={
-            "Amount": st.column_config.NumberColumn("Amount", format='accounting')
-        }, use_container_width=True)
+            # Sort user_spending by Amount descending
+            user_spending_sorted = user_spending.sort_values("Amount", ascending=False).reset_index(drop=True)
+            st.dataframe(user_spending_sorted, column_config={
+                "Amount": st.column_config.NumberColumn("Amount", format='accounting')
+            }, use_container_width=True)
+        else:
+            st.info("No spending data for users this period.")
+
+    # Show CC/PayLater summary if payments exist
+    if not expenses_period.empty:
+        cc_payments = expenses_period[
+            expenses_period["Category"].isin(["Credit Card Payment", "PayLater Payment"])
+        ]
+        if not cc_payments.empty:
+            st.subheader("💳 Credit Card & PayLater Payments This Period")
+            cc_summary = cc_payments.groupby("Category")["Amount"].sum().reset_index()
+            st.dataframe(cc_summary, column_config={
+                "Amount": st.column_config.NumberColumn("Amount", format='accounting')
+            }, use_container_width=True)
 
     # Recent Transactions
     st.subheader("📝 Recent Transactions")
@@ -296,19 +378,39 @@ elif menu == "Income":
         income_date = st.date_input("Income Date", value=datetime.today().date())
         income_source = st.selectbox("Source", ["Salary", "Freelance", "Other"])
         income_desc = st.text_input("Income Description")
-        income_amt = st.number_input("Income Amount", min_value=0.01, format="%.2f")
+        income_amt = st.number_input("Income Amount", min_value=1000.00, step=1000.00, format="%.2f")
         income_submit = st.form_submit_button("➕ Add Income")
+        
         if income_submit and income_amt > 0:
             timestamp = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%m/%d/%Y %H:%M:%S")
             row = [timestamp, income_user, income_date.strftime("%m/%d/%Y"), income_source, income_desc, income_amt]
             ws_income.append_row(row)
+            
+            # Clear cache to reload data
+            st.cache_data.clear()
+            
             st.success("Income recorded!")
             st.rerun()
 
     # Income vs Expense Chart
     st.subheader("📊 Income vs. Expenses")
+    
+    # Add option to exclude CC payments from expense total
+    exclude_from_comparison = st.checkbox(
+        "Exclude CC/PayLater bill payments from expense total", 
+        value=True,
+        help="Removes credit card and PayLater bill payments from the comparison"
+    )
+    
+    if exclude_from_comparison:
+        expense_sum = expenses_period[
+            ~expenses_period["Category"].isin(["Credit Card Payment", "PayLater Payment"])
+        ]["Amount"].sum()
+    else:
+        expense_sum = expenses_period["Amount"].sum()
+    
     income_sum = income_period["Income Amount"].sum()
-    expense_sum = expenses_period["Amount"].sum()
+    
     inc_exp_df = pd.DataFrame({"Type": ["Income", "Expenses"], "Amount": [income_sum, expense_sum]})
     inc_exp_df["Type"] = pd.Categorical(inc_exp_df["Type"], categories=["Income", "Expenses"], ordered=True)
 
@@ -333,6 +435,14 @@ elif menu == "Income":
     )
 
     st.altair_chart(bar_income + text_income, use_container_width=True)
+    
+    # Show detailed breakdown
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total Income", f"{income_sum:,.0f} IDR")
+    with col2:
+        st.metric("Total Expenses", f"{expense_sum:,.0f} IDR", 
+                 delta=f"{income_sum - expense_sum:,.0f} IDR" if income_sum > expense_sum else None)
 
 # --- Budget Tab ---
 # elif menu == "Budget":
